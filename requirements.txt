@@ -1,0 +1,9 @@
+openai-whisper 
+ollama 
+pyautogui 
+sounddevice 
+soundfile 
+numpy 
+edge-tts 
+librosa 
+customtkinter 
