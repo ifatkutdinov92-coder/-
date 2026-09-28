@@ -1,11 +1,14 @@
 import sys
 import os
 import re
+import json
 import time
+import sqlite3
 import asyncio
 import subprocess
 import threading
 import webbrowser
+from datetime import datetime
 
 # === ПРОВЕРКА ЗАВИСИМОСТЕЙ ===
 def check_python():
@@ -33,11 +36,9 @@ def check_ollama():
             return True
         else:
             print("[-] Модель llama3 не скачана")
-            print("    Установи: ollama pull llama3")
             return False
     except Exception:
         print("[-] Ollama не установлен")
-        print("    Скачай: https://ollama.com")
         return False
 
 def check_ffmpeg():
@@ -77,6 +78,68 @@ def check_all():
     return all_ok
 
 
+# === КОНФИГ ===
+CONFIG_PATH = "config.json"
+
+DEFAULT_CONFIG = {
+    "assistant_name": "Voice Assistant",
+    "whisper_model": "small",
+    "ollama_model": "llama3",
+    "tts_voice": "ru-RU-SvetlanaNeural",
+    "record_seconds": 5,
+    "mic_device": 1,
+    "max_history": 5,
+    "auto_listen": False,
+    "log_to_db": True
+}
+
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+        return DEFAULT_CONFIG
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    for k, v in DEFAULT_CONFIG.items():
+        if k not in cfg:
+            cfg[k] = v
+    return cfg
+
+CONFIG = load_config()
+
+
+# === ЛОГ В SQLITE ===
+DB_PATH = "assistant_log.db"
+
+def init_db():
+    if not CONFIG.get("log_to_db", True):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS dialogs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT,
+        user_text TEXT,
+        assistant_text TEXT,
+        command_done INTEGER
+    )""")
+    conn.commit()
+    conn.close()
+
+def log_dialog(user_text, assistant_text, command_done):
+    if not CONFIG.get("log_to_db", True):
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("INSERT INTO dialogs (created_at, user_text, assistant_text, command_done) VALUES (?,?,?,?)",
+                  (datetime.now().isoformat(), user_text, assistant_text, int(command_done)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[-] Ошибка лога: {e}")
+
+
 if __name__ == "__main__":
     if not check_all():
         print("[-] Не всё установлено. Исправь и запусти снова.")
@@ -84,7 +147,7 @@ if __name__ == "__main__":
         sys.exit(1)
     print("[+] Всё готово. Запускаю GUI...")
     print("=" * 60)
-    # === ЗАПУСК GUI ===
+
     import whisper
     import ollama
     import pyautogui
@@ -95,16 +158,18 @@ if __name__ == "__main__":
     import librosa
     import customtkinter as ctk
 
-    WHISPER_MODEL = "small"
-    OLLAMA_MODEL = "llama3"
-    TTS_VOICE = "ru-RU-SvetlanaNeural"
-    RECORD_SECONDS = 5
+    init_db()
+
+    WHISPER_MODEL = CONFIG["whisper_model"]
+    OLLAMA_MODEL = CONFIG["ollama_model"]
+    TTS_VOICE = CONFIG["tts_voice"]
+    RECORD_SECONDS = CONFIG["record_seconds"]
+    MIC_DEVICE = CONFIG["mic_device"]
+    MAX_HISTORY = CONFIG["max_history"]
     SAMPLE_RATE = 16000
     RECORD_RATE = 48000
-    MIC_DEVICE = 1
     TEMP_AUDIO = "voice_input.wav"
     TEMP_OUTPUT = "voice_output.mp3"
-    MAX_HISTORY = 5
 
     print("[+] Загружаю Whisper...")
     whisper_model = whisper.load_model(WHISPER_MODEL)
@@ -244,13 +309,25 @@ if __name__ == "__main__":
             done = True
             result_msg = "Выключаю ПК через 30 секунд"
 
+        if "ярче" in text_lower:
+            for _ in range(5):
+                pyautogui.press('brightnessup')
+            done = True
+            result_msg = "Сделал ярче"
+
+        if "темнее" in text_lower:
+            for _ in range(5):
+                pyautogui.press('brightnessdown')
+            done = True
+            result_msg = "Сделал темнее"
+
         return done, result_msg
 
     class VoiceAssistantApp(ctk.CTk):
         def __init__(self):
             super().__init__()
-            self.title("Voice Assistant")
-            self.geometry("700x700")
+            self.title(CONFIG["assistant_name"])
+            self.geometry("700x750")
             self.resizable(False, False)
 
             ctk.set_appearance_mode("dark")
@@ -270,7 +347,7 @@ if __name__ == "__main__":
             self.avatar.pack()
 
             self.name_label = ctk.CTkLabel(
-                self, text="Voice Assistant",
+                self, text=CONFIG["assistant_name"],
                 font=("Arial", 24, "bold")
             )
             self.name_label.pack(pady=5)
@@ -324,7 +401,7 @@ if __name__ == "__main__":
 
         def on_listen(self):
             self.listen_btn.configure(state="disabled", text="🎤 Слушаю...")
-            self.status_label.configure(text="Слушаю 5 секунд...")
+            self.status_label.configure(text=f"Слушаю {RECORD_SECONDS} секунд...")
             threading.Thread(target=self.process_voice, daemon=True).start()
 
         def process_voice(self):
@@ -345,6 +422,8 @@ if __name__ == "__main__":
 
                 done, cmd_msg = execute_command(text)
                 answer = cmd_msg if done else ask_llama(text)
+
+                log_dialog(text, answer, done)
 
                 self.after(0, lambda: self.add_message("Ассистент", answer, "assistant"))
                 self.after(0, lambda: self.status_label.configure(text="Готов"))
